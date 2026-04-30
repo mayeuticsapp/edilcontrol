@@ -1,57 +1,67 @@
 # EdilControl — PRD
 
 ## Problema originale
-Cliente ha richiesto: "Inizia e completa un app definitiva opzione A con la possibilità di implementare l'aggiunta di un agente AI in un secondo momento, hai carta bianca inizia e completa l'app senza chiedermi più nulla, creila adatta nel settore edile per un impresa edile."
+"Inizia e completa un app definitiva opzione A con la possibilità di implementare l'aggiunta di un agente AI in un secondo momento, hai carta bianca inizia e completa l'app senza chiedermi più nulla, creila adatta nel settore edile per un impresa edile."
 
-Opzione A = **Financial Health Dashboard** per imprese edili: Break Even Point, EBITDA, Cash Flow, gestione cantieri, predisposto per agente AI futuro.
+Opzione A = **Financial Health Dashboard** per imprese edili: Break Even Point, EBITDA, Cash Flow, gestione cantieri, **Consulente AI integrato**.
 
 ## Architettura
-- **Frontend**: React 19 + Tailwind + Recharts. Tema Swiss/architettonico (Cabinet Grotesk + IBM Plex Sans/Mono, blueprint blue #0F4C81)
+- **Frontend**: React 19 + Tailwind + Recharts (Cabinet Grotesk + IBM Plex Sans/Mono, blueprint blue #0F4C81, stile Swiss/control room)
 - **Backend**: FastAPI + Motor (MongoDB async)
-- **Database**: MongoDB. Collezioni: `cantieri`, `movimenti`, `costi_fissi`, `status_checks`
-- **Sidebar dark + content light** per stile "control room"
-- Tutto in italiano, terminologia settore edile (cantiere, commessa, SAL, subappalti, manodopera, materiali)
+- **Database**: MongoDB. Collezioni: `cantieri`, `movimenti`, `costi_fissi`, `chat_messages`, `status_checks`
+- **AI**: Claude Sonnet 4.5 via `emergentintegrations` + `EMERGENT_LLM_KEY`
+- Sidebar dark + content light. Tutto in italiano.
 
 ## Personas
-- **Imprenditore edile / titolare** — vuole vedere a colpo d'occhio se l'azienda è in salute
-- **Capocantiere / responsabile commesse** — gestisce anagrafica cantieri e marginalità
-- **Amministrativo / commercialista** — registra entrate/uscite, monitora cash flow
-
-## Requisiti core (statici)
-1. Dashboard riassuntiva con KPI (Fatturato, EBITDA, Cassa, Portafoglio commesse)
-2. Calcolatore Break Even Point
-3. Monitor EBITDA con semaforo (critico/attenzione/buono/ottimo)
-4. Cash Flow mensile con grafico entrate/uscite
-5. Gestione cantieri/commesse con margini
-6. Costi fissi configurabili
-7. Placeholder Consulente AI (predisposto per attivazione futura)
+- Imprenditore edile / titolare — KPI a colpo d'occhio
+- Capocantiere / responsabile commesse — anagrafica e marginalità
+- Amministrativo / commercialista — registro cassa
 
 ## Implementato (Gen 2026)
-- ✅ Backend completo: 13/13 test passati (Cantieri CRUD, Movimenti CRUD, Costi fissi CRUD, Break Even calc, Dashboard summary, Margini per cantiere, AI status placeholder, Seed demo idempotente)
-- ✅ Frontend: 7 pagine (Dashboard, Cantieri, Cash Flow, Break Even, EBITDA, Costi Fissi, AI Advisor)
-- ✅ Sidebar navigation, modali per CRUD, grafici Recharts (bar+pie)
-- ✅ Dati demo precaricati: 4 cantieri reali, 26 movimenti, 7 costi fissi
-- ✅ Tutti i `data-testid` in kebab-case
-- ✅ Locale italiano (formattazione € e date)
-- ✅ Endpoint `/api/ai-advisor/status` predisposto per integrazione futura
+### Iteration 1 — MVP base (test backend 13/13 ✅, frontend 100% ✅)
+- Dashboard KPI (Fatturato, EBITDA semaforo, Cassa, Portafoglio)
+- Cantieri CRUD con margini auto-calcolati
+- Cash Flow / Movimenti CRUD con totali
+- Break Even Calculator
+- EBITDA Monitor con soglie settore edile
+- Costi Fissi configurabili
+- Dati demo seed (4 cantieri, 26 movimenti, 7 costi fissi)
+
+### Iteration 2 — AI Advisor attivato (test 6/7, fix iter 3)
+- Endpoint `/api/ai-advisor/chat` con Claude Sonnet 4.5
+- System prompt italiano + iniezione dati finanziari real-time
+- Persistenza conversazioni in `chat_messages`
+- UI chat completa con suggerimenti, badge stato, session in localStorage
+
+### Iteration 3 — Multi-turn fix (test 7/7 ✅)
+- Bug risolto: AI ora ricorda i messaggi precedenti nella stessa sessione
+- Soluzione: stateless transcript injection (carica ultimi 20 msg da Mongo, li include nel prompt)
+- Robusto a riavvii del server
 
 ## Backlog prioritizzato
 
-### P1 — Attivazione AI Advisor
-- Integrare GPT-5.2 o Claude Sonnet 4.5 via Emergent LLM key
-- Endpoint `/api/ai-advisor/chat` con contesto dei dati finanziari
-- Chat UI nella pagina AI Advisor
+### P1 — Quality of life AI
+- Pulsante "Nuova chat" per ruotare session_id (controllo costi token)
+- Costante `MAX_HISTORY_MESSAGES` invece di magic number
+- `max_length=4000` su `ChatRequest.message`
+- Test del path HTTP 503 (key mancante)
 
 ### P2 — Funzionalità avanzate
-- Autenticazione (login multi-utente per impresa)
-- Export PDF/Excel dei report
+- Autenticazione multi-utente per impresa
+- Export PDF/Excel report
 - Dettaglio cantiere con timeline movimenti collegati
-- Previsione cash flow a 3/6 mesi
-- Notifiche email per soglie critiche
+- Previsione cash flow a 3/6 mesi (AI-driven)
+- Notifiche email su soglie critiche
 - Multi-impresa / multi-azienda
 
-### P3 — Qualità/UX
+### P3 — UX
 - Filtri date avanzati su movimenti
-- Ricerca full-text su cantieri
+- Ricerca full-text cantieri
 - Allegati/foto per cantiere
 - Mobile responsive ottimizzato
+- Streaming delle risposte AI (SSE)
+
+## Note di portabilità
+- App testata su Emergent preview
+- Per deploy esterno (Render/Railway/Fly.io): impostare `MONGO_URL`, `DB_NAME`, `EMERGENT_LLM_KEY`, `CORS_ORIGINS` nelle env vars della piattaforma
+- L'`EMERGENT_LLM_KEY` è raggiungibile da qualsiasi backend con accesso internet — non vincolata a Emergent native deploy
