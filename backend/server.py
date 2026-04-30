@@ -10,9 +10,12 @@ from typing import List, Optional, Literal
 import uuid
 from datetime import datetime, timezone, date
 from collections import defaultdict
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -431,11 +434,158 @@ async def seed_demo():
     return {"seeded": True, "cantieri": len(cantieri_demo), "movimenti": len(movimenti_demo), "costi_fissi": len(costi_fissi_demo)}
 
 
-# ----- AI Advisor placeholder -----
+# ----- AI Advisor (Claude Sonnet 4.5) -----
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    reply: str
+
+
+async def _build_financial_context() -> str:
+    """Costruisce il contesto finanziario reale da iniettare nel system prompt."""
+    movimenti = await db.movimenti.find({}, {"_id": 0}).to_list(5000)
+    cantieri = await db.cantieri.find({}, {"_id": 0}).to_list(1000)
+    costi_fissi = await db.costi_fissi.find({"attivo": True}, {"_id": 0}).to_list(500)
+
+    fatturato = sum(m["importo"] for m in movimenti if m["tipo"] == "entrata")
+    uscite = sum(m["importo"] for m in movimenti if m["tipo"] == "uscita")
+    cassa = fatturato - uscite
+
+    cat_costi = defaultdict(float)
+    for m in movimenti:
+        if m["tipo"] == "uscita":
+            cat_costi[m["categoria"]] += m["importo"]
+    cat_venduto = {"Materiali", "Manodopera", "Subappalti", "Mezzi", "Noli", "Carburante"}
+    cat_personale = {"Stipendi", "Contributi", "TFR"}
+    costi_v = sum(v for k, v in cat_costi.items() if k in cat_venduto)
+    costi_p = sum(v for k, v in cat_costi.items() if k in cat_personale)
+    costi_o = sum(v for k, v in cat_costi.items() if k not in cat_venduto and k not in cat_personale)
+    ebitda = fatturato - costi_v - costi_o - costi_p
+    ebitda_pct = (ebitda / fatturato * 100) if fatturato > 0 else 0
+    cf_mensili = sum(c["importo_mensile"] for c in costi_fissi)
+    mesi_cop = (cassa / cf_mensili) if cf_mensili > 0 else 0
+
+    cantieri_info = []
+    for c in cantieri:
+        costi_c = c["costi_materiali"] + c["costi_manodopera"] + c["costi_subappalti"] + c.get("altri_costi", 0)
+        margine = c["valore_commessa"] - costi_c
+        margine_pct = (margine / c["valore_commessa"] * 100) if c["valore_commessa"] > 0 else 0
+        cantieri_info.append(
+            f"  - {c['nome']} ({c['cliente']}, {c['stato']}): valore €{c['valore_commessa']:,.0f}, "
+            f"costi €{costi_c:,.0f}, margine €{margine:,.0f} ({margine_pct:.1f}%)"
+        )
+
+    cat_lines = "\n".join(f"  - {k}: €{v:,.0f}" for k, v in sorted(cat_costi.items(), key=lambda x: -x[1]))
+    cantieri_lines = "\n".join(cantieri_info) if cantieri_info else "  (nessun cantiere)"
+
+    return f"""DATI FINANZIARI ATTUALI DELL'IMPRESA EDILE:
+
+CONTO ECONOMICO:
+- Fatturato totale: €{fatturato:,.0f}
+- Costi del venduto (materiali, manodopera, subappalti): €{costi_v:,.0f}
+- Costi operativi: €{costi_o:,.0f}
+- Costi del personale: €{costi_p:,.0f}
+- EBITDA: €{ebitda:,.0f} ({ebitda_pct:.1f}% del fatturato)
+
+LIQUIDITÀ:
+- Posizione di cassa: €{cassa:,.0f}
+- Costi fissi mensili: €{cf_mensili:,.0f}
+- Mesi di copertura: {mesi_cop:.1f}
+
+CANTIERI ({len(cantieri)} totali):
+{cantieri_lines}
+
+RIPARTIZIONE COSTI PER CATEGORIA:
+{cat_lines}
+"""
+
+
+SYSTEM_PROMPT_BASE = """Sei un Consulente Finanziario AI specializzato per imprese edili italiane.
+Il tuo ruolo è analizzare i dati finanziari dell'azienda e fornire consigli concreti, pratici e in italiano.
+
+REGOLE:
+- Rispondi SEMPRE in italiano
+- Sii diretto, sintetico e professionale (max 4-6 frasi per risposta, salvo richieste di approfondimento)
+- Usa cifre concrete dai dati forniti, non inventare numeri
+- Identifica criticità (EBITDA<15%, cassa<3 mesi, margini commesse<10%) e suggerisci azioni
+- Conosci la terminologia edile: cantiere, commessa, SAL, subappalti, cappotto, capannone, ecc.
+- Le soglie di riferimento per il settore edile sono:
+  * EBITDA: ottimo >20%, buono 15-20%, attenzione 5-15%, critico <5%
+  * Margine commessa: ottimo >20%, attenzione 10-20%, critico <10%
+  * Copertura cassa: minimo 3 mesi di costi fissi
+- Quando suggerisci azioni, sii specifico (es: "rinegozia il fornitore X", "aumenta del 5% il prezzo medio")
+- Non rispondere a domande non finanziarie/aziendali. Se l'utente chiede altro, riconducilo al suo business.
+"""
+
 
 @api_router.get("/ai-advisor/status")
 async def ai_advisor_status():
-    return {"abilitato": False, "messaggio": "Modulo Consulente AI in arrivo. Sarà attivabile in un secondo momento."}
+    return {
+        "abilitato": bool(EMERGENT_LLM_KEY),
+        "modello": "claude-sonnet-4-5-20250929",
+        "provider": "anthropic",
+        "messaggio": "Consulente AI attivo" if EMERGENT_LLM_KEY else "EMERGENT_LLM_KEY non configurata"
+    }
+
+
+@api_router.post("/ai-advisor/chat", response_model=ChatResponse)
+async def ai_advisor_chat(req: ChatRequest):
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(503, "Consulente AI non configurato (EMERGENT_LLM_KEY mancante)")
+    if not req.message.strip():
+        raise HTTPException(400, "Messaggio vuoto")
+
+    # Salva il messaggio utente
+    user_msg = ChatMessage(session_id=req.session_id, role="user", content=req.message)
+    await db.chat_messages.insert_one(user_msg.model_dump())
+
+    # Costruisce contesto finanziario aggiornato e system prompt
+    contesto = await _build_financial_context()
+    system_prompt = SYSTEM_PROMPT_BASE + "\n\n" + contesto
+
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=req.session_id,
+            system_message=system_prompt,
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+
+        reply_text = await chat.send_message(UserMessage(text=req.message))
+    except Exception as e:
+        logger.exception("Errore Claude")
+        raise HTTPException(500, f"Errore AI: {str(e)}")
+
+    # Salva la risposta
+    assistant_msg = ChatMessage(session_id=req.session_id, role="assistant", content=reply_text)
+    await db.chat_messages.insert_one(assistant_msg.model_dump())
+
+    return ChatResponse(session_id=req.session_id, reply=reply_text)
+
+
+@api_router.get("/ai-advisor/history/{session_id}", response_model=List[ChatMessage])
+async def ai_advisor_history(session_id: str):
+    docs = await db.chat_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    return docs
+
+
+@api_router.delete("/ai-advisor/history/{session_id}")
+async def ai_advisor_clear(session_id: str):
+    await db.chat_messages.delete_many({"session_id": session_id})
+    return {"ok": True}
 
 
 # ============== APP SETUP ==============
