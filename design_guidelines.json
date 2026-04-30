@@ -1,0 +1,99 @@
+{
+  "theme_and_archetype": {
+    "theme": "LIGHT",
+    "archetype": "4 (Swiss & High-Contrast)",
+    "rationale": "For an Italian construction company's financial dashboard, we need a 'Control Room' aesthetic that combines industrial precision (blueprints, concrete) with financial clarity. The UI is objective, rigid, and functional. High contrast ensures readability in various environments."
+  },
+  "typography": {
+    "font_family": {
+      "headings": "'Cabinet Grotesk', sans-serif",
+      "body": "'IBM Plex Sans', sans-serif",
+      "mono": "'IBM Plex Mono', monospace"
+    },
+    "instructions_to_main_agent": "Import fonts: @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap'); @import url('https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@800,500,700,400&display=swap'); Configure Tailwind to use 'Cabinet Grotesk' for sans/headings, 'IBM Plex Sans' for body, and 'IBM Plex Mono' for mono. 'Cabinet Grotesk' gives a strong, architectural feel. 'IBM Plex Sans' ensures technical readability. 'IBM Plex Mono' is for financial figures to align decimals perfectly.",
+    "hierarchy": {
+      "h1": "text-3xl md:text-4xl tracking-tight font-bold",
+      "h2": "text-2xl md:text-3xl tracking-tight font-bold",
+      "h3": "text-xl font-semibold",
+      "h4": "text-lg font-semibold",
+      "body": "text-sm",
+      "data_labels": "text-xs tracking-[0.05em] uppercase font-semibold text-zinc-500",
+      "financial_figures": "text-2xl font-mono tracking-tight font-semibold"
+    }
+  },
+  "colors": {
+    "background": {
+      "main": "bg-zinc-50",
+      "card": "bg-white",
+      "sidebar": "bg-zinc-950"
+    },
+    "text": {
+      "primary": "text-zinc-900",
+      "secondary": "text-zinc-500",
+      "inverse": "text-zinc-50"
+    },
+    "brand": {
+      "primary": "bg-[#0F4C81]",
+      "primary_hover": "hover:bg-[#0C3D66]",
+      "primary_text": "text-white"
+    },
+    "status": {
+      "success": "text-green-700 bg-green-50 border border-green-200",
+      "warning": "text-amber-700 bg-amber-50 border border-amber-200",
+      "danger": "text-red-700 bg-red-50 border border-red-200"
+    },
+    "borders": "border-zinc-200"
+  },
+  "spacing_and_layout": {
+    "grid_system": "MODE B: THE 'CONTROL ROOM' GRID. Strict grid hierarchy, dense and compact spacing.",
+    "container_padding": "p-5 md:p-6",
+    "gap": "gap-4 md:gap-6",
+    "radius": "rounded-sm (max 4px)",
+    "borders": "Expose the skeleton. Use pure 1px solid borders for cards and tables. Avoid soft shadows.",
+    "shadows": "shadow-none. Use borders instead of shadows to delineate sections. Hover states can have a subtle shadow-sm."
+  },
+  "components_strategy": {
+    "cards": "Flat, sharp corners (rounded-sm), 1px solid border-zinc-200. No shadow by default.",
+    "tables": "High-density data grids. IBM Plex Mono for financial columns. Right-align all currency columns. Zebra striping (bg-zinc-50) on alternating rows for readability.",
+    "buttons": "Sharp corners, high contrast. Primary buttons use Blueprint Blue (#0F4C81).",
+    "sidebar": "Dark slate/zinc-950 with white text. Represents the structural 'beam' of the app. High contrast from the main content area.",
+    "badges": "Traffic light status for EBITDA/Margin. Red (<15%), Green (>20%). Small, uppercase mono labels.",
+    "charts": "Recharts via Shadcn. Use line charts for 'Cash Flow' and pie/donut charts for 'Cost Breakdown'. Chart colors should use brand blue, concrete grey, and safety yellow/orange."
+  },
+  "motion_and_interactions": {
+    "transitions": "Minimalist. transition-all duration-150 ease-in-out.",
+    "hover_states": "Cards lift slightly (-translate-y-[1px]) with shadow-sm. Interactive elements must have clear hover states.",
+    "focus_states": "focus:ring-2 focus:ring-[#0F4C81] focus:ring-offset-2 focus:outline-none"
+  },
+  "media": {
+    "image_urls": [
+      {
+        "category": "empty_state_blueprint",
+        "url": "https://images.pexels.com/photos/8470842/pexels-photo-8470842.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Blueprint top view, ideal for 'no projects selected' or empty state background"
+      },
+      {
+        "category": "user_avatar_placeholder",
+        "url": "https://images.unsplash.com/photo-1772442198624-4fc4d7281e89?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwxfHxjb25zdHJ1Y3Rpb24lMjBzaXRlJTIwYmx1ZXByaW50c3xlbnwwfHx8fDE3Nzc1MzIxNzh8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Construction manager looking at plans"
+      }
+    ]
+  },
+  "icons": {
+    "library": "lucide-react",
+    "instructions": "Use Lucide icons with sharp, consistent stroke-widths (1.5px or 2px). Essential icons: LayoutDashboard, HardHat (for projects/cantieri), Wallet, LineChart, AlertTriangle, Calculator."
+  },
+  "accessibility_and_testing": {
+    "testing_attributes": "All interactive elements and key text MUST include a data-testid attribute (e.g., data-testid='login-button', data-testid='ebitda-metric', data-testid='project-list-item').",
+    "contrast": "Ensure APCA/WCAG AA contrast ratios, especially for financial figures."
+  },
+  "specific_functionalities": {
+    "dashboard_riassuntiva": "Top row KPI cards: Fatturato, EBITDA (with traffic light badge), Cash Position, Break Even. Use bento grid layout.",
+    "break_even_calculator": "Card layout with inputs for 'Costi fissi', 'Prezzo medio', 'Costo variabile' and a large mono result output.",
+    "ebitda_monitor": "Highlight prominently. Use status colors based on thresholds.",
+    "cash_flow": "Bar or Line chart for Entrate/Uscite over time.",
+    "gestione_cantieri": "Table listing projects (cantieri) with columns for Materials, Labor, Subcontractor costs.",
+    "ai_advisor": "A distinct card with a subtle gradient/shimmer border (The 'Tracing Beam' pattern) to indicate futuristic AI. State: 'In arrivo' (Coming soon) to act as a placeholder.",
+    "language": "All UI text MUST be in Italian."
+  }
+}
