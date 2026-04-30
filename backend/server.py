@@ -549,6 +549,12 @@ async def ai_advisor_chat(req: ChatRequest):
     if not req.message.strip():
         raise HTTPException(400, "Messaggio vuoto")
 
+    # Carica cronologia PRIMA di salvare il nuovo messaggio (ultimi 20 turni)
+    prior = await db.chat_messages.find(
+        {"session_id": req.session_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(40)
+    prior = prior[-20:]  # cap a 20 messaggi per controllo costi
+
     # Salva il messaggio utente
     user_msg = ChatMessage(session_id=req.session_id, role="user", content=req.message)
     await db.chat_messages.insert_one(user_msg.model_dump())
@@ -557,6 +563,21 @@ async def ai_advisor_chat(req: ChatRequest):
     contesto = await _build_financial_context()
     system_prompt = SYSTEM_PROMPT_BASE + "\n\n" + contesto
 
+    # Costruisce il messaggio includendo la cronologia (stateless multi-turn)
+    if prior:
+        transcript_lines = []
+        for m in prior:
+            label = "Utente" if m["role"] == "user" else "Tu (assistente)"
+            transcript_lines.append(f"{label}: {m['content']}")
+        transcript = "\n".join(transcript_lines)
+        full_message = (
+            f"[CRONOLOGIA CONVERSAZIONE PRECEDENTE]\n{transcript}\n"
+            f"[FINE CRONOLOGIA]\n\n"
+            f"[NUOVO MESSAGGIO DELL'UTENTE]\n{req.message}"
+        )
+    else:
+        full_message = req.message
+
     try:
         chat = LlmChat(
             api_key=EMERGENT_LLM_KEY,
@@ -564,10 +585,10 @@ async def ai_advisor_chat(req: ChatRequest):
             system_message=system_prompt,
         ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
-        reply_text = await chat.send_message(UserMessage(text=req.message))
+        reply_text = await chat.send_message(UserMessage(text=full_message))
     except Exception as e:
         logger.exception("Errore Claude")
-        raise HTTPException(500, f"Errore AI: {str(e)}")
+        raise HTTPException(500, "Errore nella chiamata al Consulente AI")
 
     # Salva la risposta
     assistant_msg = ChatMessage(session_id=req.session_id, role="assistant", content=reply_text)
