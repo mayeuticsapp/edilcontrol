@@ -5,7 +5,7 @@ import { Building2, Lock, User, Loader2 } from "lucide-react";
 
 export default function Login() {
   const { login, user, loading } = useAuth();
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState("Albertoadminapp");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -95,7 +95,6 @@ export default function Login() {
                 <input
                   type="text"
                   required
-                  autoFocus
                   autoComplete="username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
@@ -112,6 +111,7 @@ export default function Login() {
                 <input
                   type="password"
                   required
+                  autoFocus
                   autoComplete="current-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
