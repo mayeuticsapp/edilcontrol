@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -8,14 +9,23 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Literal
 import uuid
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from collections import defaultdict
+import bcrypt
+import jwt
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+JWT_SECRET = os.environ.get('JWT_SECRET', 'change-me')
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 24
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_MINUTES = 15
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -23,6 +33,167 @@ db = client[os.environ['DB_NAME']]
 
 app = FastAPI(title="EdilControl API")
 api_router = APIRouter(prefix="/api")
+auth_scheme = HTTPBearer(auto_error=False)
+
+
+# ============== AUTH ==============
+
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def create_access_token(user_id: str, username: str) -> str:
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
+        "iat": datetime.now(timezone.utc),
+        "type": "access",
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+async def get_current_user(
+    request: Request,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme),
+) -> dict:
+    token = creds.credentials if creds else None
+    if not token:
+        # fallback: header parsing in case auto_error=False didn't catch it
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Non autenticato")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Token non valido")
+        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+        if not user:
+            raise HTTPException(status_code=401, detail="Utente non trovato")
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Sessione scaduta, accedi di nuovo")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token non valido")
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: dict
+    expires_in: int
+
+
+async def _check_lockout(identifier: str) -> None:
+    rec = await db.login_attempts.find_one({"identifier": identifier})
+    if not rec:
+        return
+    if rec.get("count", 0) >= MAX_FAILED_ATTEMPTS:
+        last = rec.get("last_attempt")
+        if last:
+            elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 60
+            if elapsed < LOCKOUT_MINUTES:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Troppi tentativi falliti. Riprova tra {int(LOCKOUT_MINUTES - elapsed) + 1} minuti."
+                )
+            # lockout scaduto, reset
+            await db.login_attempts.delete_one({"identifier": identifier})
+
+
+async def _record_failed_attempt(identifier: str) -> None:
+    await db.login_attempts.update_one(
+        {"identifier": identifier},
+        {"$inc": {"count": 1}, "$set": {"last_attempt": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+
+
+async def _clear_attempts(identifier: str) -> None:
+    await db.login_attempts.delete_one({"identifier": identifier})
+
+
+@api_router.post("/auth/login", response_model=LoginResponse)
+async def login(req: LoginRequest, request: Request):
+    ip = request.client.host if request.client else "unknown"
+    identifier = f"{ip}:{req.username.lower()}"
+
+    await _check_lockout(identifier)
+
+    user = await db.users.find_one({"username": req.username})
+    if not user or not verify_password(req.password, user.get("password_hash", "")):
+        await _record_failed_attempt(identifier)
+        raise HTTPException(status_code=401, detail="Credenziali non valide")
+
+    await _clear_attempts(identifier)
+
+    token = create_access_token(user["id"], user["username"])
+    return LoginResponse(
+        access_token=token,
+        user={"id": user["id"], "username": user["username"], "role": user.get("role", "admin")},
+        expires_in=JWT_EXPIRY_HOURS * 3600,
+    )
+
+
+@api_router.get("/auth/me")
+async def auth_me(current=Depends(get_current_user)):
+    return current
+
+
+@api_router.post("/auth/logout")
+async def logout(current=Depends(get_current_user)):
+    # Stateless JWT: il client elimina il token. Endpoint esiste per coerenza/audit.
+    return {"ok": True, "message": "Logout effettuato"}
+
+
+async def seed_admin():
+    """Crea/aggiorna l'utente admin in modo idempotente."""
+    existing = await db.users.find_one({"username": ADMIN_USERNAME})
+    if not existing:
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "username": ADMIN_USERNAME,
+            "password_hash": hash_password(ADMIN_PASSWORD),
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    else:
+        # se la password in env è cambiata, aggiorna l'hash
+        if not verify_password(ADMIN_PASSWORD, existing.get("password_hash", "")):
+            await db.users.update_one(
+                {"username": ADMIN_USERNAME},
+                {"$set": {"password_hash": hash_password(ADMIN_PASSWORD)}}
+            )
+    # indici
+    try:
+        await db.users.create_index("username", unique=True)
+        await db.login_attempts.create_index("identifier")
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+async def on_startup():
+    await seed_admin()
+
+
+# Dependency da applicare a tutte le rotte protette
+AuthDep = Depends(get_current_user)
 
 
 # ============== MODELS ==============
@@ -612,6 +783,46 @@ async def ai_advisor_clear(session_id: str):
 # ============== APP SETUP ==============
 
 app.include_router(api_router)
+
+# ============== AUTH MIDDLEWARE ==============
+# Protegge tutti gli endpoint /api/* eccetto la whitelist pubblica
+PUBLIC_PATHS = {"/api/", "/api", "/api/auth/login", "/docs", "/openapi.json", "/redoc"}
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    method = request.method
+
+    # CORS preflight
+    if method == "OPTIONS":
+        return await call_next(request)
+
+    # Whitelist
+    if path in PUBLIC_PATHS or not path.startswith("/api/"):
+        return await call_next(request)
+
+    # Verifica JWT
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        from starlette.responses import JSONResponse
+        return JSONResponse({"detail": "Non autenticato"}, status_code=401)
+    token = auth_header[7:]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            from starlette.responses import JSONResponse
+            return JSONResponse({"detail": "Token non valido"}, status_code=401)
+        request.state.user_id = payload.get("sub")
+        request.state.username = payload.get("username")
+    except jwt.ExpiredSignatureError:
+        from starlette.responses import JSONResponse
+        return JSONResponse({"detail": "Sessione scaduta, accedi di nuovo"}, status_code=401)
+    except jwt.InvalidTokenError:
+        from starlette.responses import JSONResponse
+        return JSONResponse({"detail": "Token non valido"}, status_code=401)
+
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,

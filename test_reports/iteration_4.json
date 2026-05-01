@@ -1,0 +1,57 @@
+{
+  "summary": "Iteration 4 auth testing for EdilControl. 25/26 backend auth tests PASSED. JWT login, token verification, protected middleware, bcrypt hashing, seed idempotency all working. Frontend login → dashboard → AI chat → logout full flow works perfectly. One real backend bug found in brute force lockout logic: returns 500 instead of 429 due to naive/aware datetime mismatch, and identifier uses request.client.host which varies across ingress pods so counter never accumulates to 5 in production.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "/api/auth/login",
+        "issue": "Brute force lockout returns HTTP 500 instead of 429 after 5 failed attempts. Root cause: _check_lockout() compares `datetime.now(timezone.utc)` (offset-aware) with `last_attempt` read from MongoDB (naive) → `TypeError: can't subtract offset-naive and offset-aware datetimes`. Fix: normalize `last = last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last` before subtracting, OR store as ISO string.",
+        "priority": "HIGH"
+      },
+      {
+        "endpoint": "/api/auth/login",
+        "issue": "Brute force identifier uses `request.client.host` which, behind k8s ingress with multiple backend pods, returns a DIFFERENT internal proxy IP per request (observed 10.81.2.194 and 10.81.7.199 for same real client). Counter never accumulates → lockout never triggers in production. Fix: read `X-Forwarded-For` (first IP) or `X-Real-IP` header when present.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_auth.py",
+    "/app/test_reports/pytest/auth_iter4.xml"
+  ],
+  "action_items": [
+    "Fix _check_lockout datetime comparison: ensure `last_attempt` is timezone-aware before subtraction (store as ISO string or call .replace(tzinfo=timezone.utc) on read).",
+    "Fix brute force IP detection behind ingress: use X-Forwarded-For / X-Real-IP instead of request.client.host, otherwise lockout never fires in production.",
+    "After applying fixes, clear db.login_attempts and re-run test_auth.py::TestBruteForce to validate 429 response."
+  ],
+  "critical_code_review_comments": [
+    "Line ~805 auth_middleware duplicates JWT decode logic from get_current_user → DRY violation (two places to maintain).",
+    "Line ~109 _check_lockout: datetime TZ bug (described above). Same code also silently catches bcrypt exceptions — acceptable for verify_password but masks config issues.",
+    "server.py is 842 lines — past the 700-line threshold. Consider splitting into auth.py / cantieri.py / ai_advisor.py modules.",
+    "PUBLIC_PATHS whitelist is fine, but middleware is applied AFTER CORSMiddleware via app.add_middleware — ordering is correct since FastAPI executes middleware in reverse order of registration. Worth adding a code comment.",
+    "login endpoint does not sanitize/trim username; case-insensitive handling only happens in identifier but DB lookup is case-sensitive (`{'username': req.username}`) — minor inconsistency."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_auth.py (created)"
+  ],
+  "success_rate": {
+    "backend": "96% (25/26 auth tests; single failure is a real backend bug not a test issue)",
+    "frontend": "100% (login, redirect, logout, dashboard KPIs, AI chat post-login all working)"
+  },
+  "test_credentials": "username=Albertoadminapp, password=Murgi@2026! (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None created; /api/seed-demo already populated DB in previous iterations.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "After main agent fixes the two brute force bugs, re-run `pytest /app/backend/tests/test_auth.py::TestBruteForce -v` to confirm attempt #6 returns 429 (not 500). Also verify behind k8s ingress by running the full test file against REACT_APP_BACKEND_URL. Note: test_auth.py clears login_attempts collection before each login-related test to avoid cross-test pollution. Existing test_edilcontrol_api.py and test_ai_advisor.py from prior iterations do NOT include auth headers; they will now all fail with 401 — either update them with an auth fixture or leave as-is (auth tests cover the happy path).",
+  "rca of the issue": {
+    "bug": "Brute force lockout returns 500 instead of 429",
+    "reproduction": "1) Clear db.login_attempts. 2) POST /api/auth/login with wrong password 5 times. 3) Attempt #6 returns 500 Internal Server Error instead of 429 lockout.",
+    "root_cause": "In _check_lockout (server.py line 109), `last = rec.get('last_attempt')` returns a naive datetime (MongoDB drops tzinfo on insert when using datetime.now(timezone.utc) unless codec_options specify tz_aware=True). Subtracting this from `datetime.now(timezone.utc)` (aware) raises TypeError, which FastAPI converts to 500.",
+    "mitigation": "Either: (a) normalize on read: `if last and last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)`; (b) configure motor client with `tz_aware=True`; or (c) store last_attempt as ISO string and parse with fromisoformat."
+  }
+}

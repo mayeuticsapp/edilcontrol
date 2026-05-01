@@ -5,6 +5,31 @@ export const API = `${BACKEND_URL}/api`;
 
 export const api = axios.create({ baseURL: API });
 
+// Attach JWT to every request
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem("edilcontrol_token");
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Redirect to login on 401
+api.interceptors.response.use(
+  (resp) => resp,
+  (err) => {
+    if (err.response?.status === 401) {
+      const onLogin = window.location.pathname === "/login";
+      localStorage.removeItem("edilcontrol_token");
+      localStorage.removeItem("edilcontrol_user");
+      if (!onLogin) {
+        window.location.href = "/login";
+      }
+    }
+    return Promise.reject(err);
+  }
+);
+
 export const formatEUR = (n) => {
   if (n === null || n === undefined || isNaN(n)) return "—";
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(n);

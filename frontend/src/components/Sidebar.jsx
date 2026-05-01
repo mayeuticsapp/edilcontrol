@@ -1,6 +1,7 @@
 import React from "react";
-import { NavLink, useLocation } from "react-router-dom";
-import { LayoutDashboard, HardHat, Wallet, Calculator, LineChart, Settings, Sparkles, Building2 } from "lucide-react";
+import { NavLink } from "react-router-dom";
+import { LayoutDashboard, HardHat, Wallet, Calculator, LineChart, Settings, Sparkles, Building2, LogOut, User } from "lucide-react";
+import { useAuth } from "../lib/auth";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
@@ -9,10 +10,12 @@ const navItems = [
   { to: "/break-even", label: "Break Even", icon: Calculator, testid: "nav-break-even" },
   { to: "/ebitda", label: "EBITDA", icon: LineChart, testid: "nav-ebitda" },
   { to: "/costi-fissi", label: "Costi Fissi", icon: Settings, testid: "nav-costi-fissi" },
-  { to: "/ai-advisor", label: "Consulente AI", icon: Sparkles, testid: "nav-ai-advisor", badge: "Soon" },
+  { to: "/ai-advisor", label: "Consulente AI", icon: Sparkles, testid: "nav-ai-advisor" },
 ];
 
 export default function Sidebar() {
+  const { user, logout } = useAuth();
+
   return (
     <aside className="w-60 bg-zinc-950 text-zinc-50 flex flex-col h-screen sticky top-0 border-r border-zinc-900" data-testid="sidebar">
       <div className="px-5 py-6 border-b border-zinc-800">
@@ -27,9 +30,9 @@ export default function Sidebar() {
         </div>
       </div>
 
-      <nav className="flex-1 px-3 py-4 space-y-0.5">
+      <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
         <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-600 px-3 py-2">Pannello</div>
-        {navItems.map(({ to, label, icon: Icon, testid, badge }) => (
+        {navItems.map(({ to, label, icon: Icon, testid }) => (
           <NavLink
             key={to}
             to={to}
@@ -45,15 +48,33 @@ export default function Sidebar() {
           >
             <Icon className="w-4 h-4" strokeWidth={1.75} />
             <span className="flex-1">{label}</span>
-            {badge && (
-              <span className="text-[9px] uppercase tracking-wider bg-zinc-800 text-zinc-400 px-1.5 py-0.5 font-mono">{badge}</span>
-            )}
           </NavLink>
         ))}
       </nav>
 
-      <div className="px-5 py-4 border-t border-zinc-800 text-[10px] uppercase tracking-[0.15em] text-zinc-600">
-        v1.0 · Gen 2026
+      <div className="border-t border-zinc-800">
+        {user && (
+          <div className="px-4 py-3 flex items-center gap-2.5 border-b border-zinc-900" data-testid="sidebar-user">
+            <div className="w-7 h-7 bg-zinc-800 flex items-center justify-center flex-shrink-0">
+              <User className="w-3.5 h-3.5 text-zinc-400" strokeWidth={1.75} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium truncate">{user.username}</div>
+              <div className="text-[10px] uppercase tracking-[0.1em] text-zinc-500">{user.role}</div>
+            </div>
+          </div>
+        )}
+        <button
+          onClick={logout}
+          className="w-full px-4 py-3 flex items-center gap-3 text-sm text-zinc-400 hover:bg-zinc-900 hover:text-red-400 transition-colors"
+          data-testid="logout-btn"
+        >
+          <LogOut className="w-4 h-4" strokeWidth={1.75} />
+          <span>Esci</span>
+        </button>
+        <div className="px-4 py-2 text-[10px] uppercase tracking-[0.15em] text-zinc-700 border-t border-zinc-900">
+          v1.1 · Gen 2026
+        </div>
       </div>
     </aside>
   );
