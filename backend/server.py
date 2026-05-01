@@ -146,11 +146,14 @@ async def _clear_attempts(identifier: str) -> None:
 @api_router.post("/auth/login", response_model=LoginResponse)
 async def login(req: LoginRequest, request: Request):
     ip = _extract_client_ip(request)
-    identifier = f"{ip}:{req.username.lower()}"
+    username_norm = req.username.strip().lower()
+    identifier = f"{ip}:{username_norm}"
 
     await _check_lockout(identifier)
 
-    user = await db.users.find_one({"username": req.username})
+    # Lookup case-insensitive (regex con anchor + IGNORECASE)
+    import re
+    user = await db.users.find_one({"username": {"$regex": f"^{re.escape(req.username.strip())}$", "$options": "i"}})
     if not user or not verify_password(req.password, user.get("password_hash", "")):
         await _record_failed_attempt(identifier)
         raise HTTPException(status_code=401, detail="Credenziali non valide")
