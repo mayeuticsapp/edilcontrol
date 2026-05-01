@@ -623,29 +623,220 @@ async def seed_demo():
     return {"seeded": True, "cantieri": len(cantieri_demo), "movimenti": len(movimenti_demo), "costi_fissi": len(costi_fissi_demo)}
 
 
-# ----- AI Advisor (Claude Sonnet 4.5) -----
+# ====================================================================
+# ============== AI ADVISOR — AGENTIC (tool use + file upload) =======
+# ====================================================================
 
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     session_id: str
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: str
+    msg_type: str = "text"  # text | proposed_actions | action_result | file
+    payload: Optional[dict] = None  # extra data per tipi non-text
+    attachments: Optional[List[dict]] = None  # [{file_id, filename, content_type}]
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    file_ids: Optional[List[str]] = None  # file caricati separatamente
+
+
+class ChatReplyAction(BaseModel):
+    action_id: str
+    tool: str
+    params: dict
+    summary: str
 
 
 class ChatResponse(BaseModel):
     session_id: str
-    reply: str
+    reply_type: str  # "message" | "proposed_actions"
+    content: str  # spiegazione o risposta testuale
+    actions: Optional[List[ChatReplyAction]] = None
 
+
+class ConfirmActionRequest(BaseModel):
+    session_id: str
+    action_ids: List[str]  # quali azioni eseguire (subset di quelle proposte)
+
+
+# ============== TOOL REGISTRY ==============
+
+TOOLS_SCHEMA = """STRUMENTI DISPONIBILI (puoi proporre l'esecuzione di una o più di queste azioni):
+
+1. crea_cantiere(nome, cliente, indirizzo?, data_inizio (YYYY-MM-DD), data_fine_prevista?, valore_commessa, costi_materiali?, costi_manodopera?, costi_subappalti?, altri_costi?, note?)
+   → Crea un nuovo cantiere/commessa.
+
+2. aggiorna_cantiere(cantiere_ref, stato?, valore_commessa?, costi_materiali?, costi_manodopera?, costi_subappalti?, altri_costi?, note?)
+   → Modifica un cantiere esistente. cantiere_ref può essere l'ID o il nome (anche parziale).
+   → stato accetta: in_corso | completato | sospeso
+
+3. elimina_cantiere(cantiere_ref)
+   → Elimina un cantiere.
+
+4. crea_movimento(data (YYYY-MM-DD), tipo (entrata|uscita), categoria, importo, descrizione, cantiere_ref?, metodo_pagamento?)
+   → Registra un movimento finanziario. Categorie tipiche entrata: Acconto cliente, SAL, Saldo finale, Rimborso.
+   → Categorie tipiche uscita: Materiali, Manodopera, Subappalti, Mezzi, Carburante, Stipendi, Tasse, Affitto, Utenze, Software, Assicurazioni, Consulenze, Altro.
+
+5. elimina_movimento(movimento_id)
+   → Elimina un movimento.
+
+6. crea_costo_fisso(descrizione, categoria, importo_mensile)
+   → Aggiunge un costo fisso mensile ricorrente.
+
+7. elimina_costo_fisso(costo_id)
+   → Rimuove un costo fisso.
+"""
+
+
+async def _resolve_cantiere_ref(ref: str) -> Optional[dict]:
+    """Trova un cantiere via ID esatto o nome (case-insensitive, contains)."""
+    if not ref:
+        return None
+    # Prova prima per ID esatto
+    doc = await db.cantieri.find_one({"id": ref}, {"_id": 0})
+    if doc:
+        return doc
+    # Poi per nome (regex case-insensitive)
+    import re as _re
+    return await db.cantieri.find_one(
+        {"nome": {"$regex": _re.escape(ref), "$options": "i"}}, {"_id": 0}
+    )
+
+
+async def execute_tool(tool: str, params: dict) -> dict:
+    """Esegue un tool e ritorna {ok, message, data?}."""
+    try:
+        if tool == "crea_cantiere":
+            obj = Cantiere(
+                nome=params["nome"],
+                cliente=params["cliente"],
+                indirizzo=params.get("indirizzo", "") or "",
+                data_inizio=params["data_inizio"],
+                data_fine_prevista=params.get("data_fine_prevista"),
+                stato=params.get("stato", "in_corso"),
+                valore_commessa=float(params.get("valore_commessa", 0) or 0),
+                costi_materiali=float(params.get("costi_materiali", 0) or 0),
+                costi_manodopera=float(params.get("costi_manodopera", 0) or 0),
+                costi_subappalti=float(params.get("costi_subappalti", 0) or 0),
+                altri_costi=float(params.get("altri_costi", 0) or 0),
+                note=params.get("note", "") or "",
+            )
+            await db.cantieri.insert_one(obj.model_dump())
+            return {"ok": True, "message": f"Cantiere '{obj.nome}' creato.", "data": {"id": obj.id, "nome": obj.nome}}
+
+        elif tool == "aggiorna_cantiere":
+            existing = await _resolve_cantiere_ref(params.get("cantiere_ref", ""))
+            if not existing:
+                return {"ok": False, "message": f"Cantiere '{params.get('cantiere_ref')}' non trovato."}
+            update_fields = {}
+            for k in ["stato", "valore_commessa", "costi_materiali", "costi_manodopera",
+                      "costi_subappalti", "altri_costi", "note", "data_fine_prevista", "indirizzo"]:
+                if k in params and params[k] is not None and params[k] != "":
+                    if k in ["valore_commessa", "costi_materiali", "costi_manodopera", "costi_subappalti", "altri_costi"]:
+                        update_fields[k] = float(params[k])
+                    else:
+                        update_fields[k] = params[k]
+            if not update_fields:
+                return {"ok": False, "message": "Nessun campo da aggiornare."}
+            await db.cantieri.update_one({"id": existing["id"]}, {"$set": update_fields})
+            return {"ok": True, "message": f"Cantiere '{existing['nome']}' aggiornato.", "data": {"id": existing["id"], "campi": list(update_fields.keys())}}
+
+        elif tool == "elimina_cantiere":
+            existing = await _resolve_cantiere_ref(params.get("cantiere_ref", ""))
+            if not existing:
+                return {"ok": False, "message": f"Cantiere '{params.get('cantiere_ref')}' non trovato."}
+            await db.cantieri.delete_one({"id": existing["id"]})
+            return {"ok": True, "message": f"Cantiere '{existing['nome']}' eliminato."}
+
+        elif tool == "crea_movimento":
+            cantiere_id = None
+            if params.get("cantiere_ref"):
+                c = await _resolve_cantiere_ref(params["cantiere_ref"])
+                cantiere_id = c["id"] if c else None
+            obj = Movimento(
+                data=params["data"],
+                tipo=params["tipo"],
+                categoria=params["categoria"],
+                descrizione=params["descrizione"],
+                importo=float(params["importo"]),
+                cantiere_id=cantiere_id,
+                metodo_pagamento=params.get("metodo_pagamento", "bonifico"),
+            )
+            await db.movimenti.insert_one(obj.model_dump())
+            return {"ok": True, "message": f"Movimento {obj.tipo} di €{obj.importo:,.2f} registrato.", "data": {"id": obj.id}}
+
+        elif tool == "elimina_movimento":
+            res = await db.movimenti.delete_one({"id": params["movimento_id"]})
+            if res.deleted_count == 0:
+                return {"ok": False, "message": "Movimento non trovato."}
+            return {"ok": True, "message": "Movimento eliminato."}
+
+        elif tool == "crea_costo_fisso":
+            obj = CostoFisso(
+                descrizione=params["descrizione"],
+                categoria=params["categoria"],
+                importo_mensile=float(params["importo_mensile"]),
+                attivo=True,
+            )
+            await db.costi_fissi.insert_one(obj.model_dump())
+            return {"ok": True, "message": f"Costo fisso '{obj.descrizione}' (€{obj.importo_mensile:,.2f}/mese) creato.", "data": {"id": obj.id}}
+
+        elif tool == "elimina_costo_fisso":
+            res = await db.costi_fissi.delete_one({"id": params["costo_id"]})
+            if res.deleted_count == 0:
+                return {"ok": False, "message": "Costo fisso non trovato."}
+            return {"ok": True, "message": "Costo fisso eliminato."}
+
+        else:
+            return {"ok": False, "message": f"Tool '{tool}' non riconosciuto."}
+    except KeyError as e:
+        return {"ok": False, "message": f"Parametro mancante: {e}"}
+    except Exception as e:
+        logger.exception(f"Errore tool {tool}")
+        return {"ok": False, "message": f"Errore esecuzione: {str(e)}"}
+
+
+# ============== FILE UPLOAD ==============
+
+import base64
+from fastapi import UploadFile, File
+
+ALLOWED_MIME = {
+    "application/pdf",
+    "image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif",
+}
+MAX_FILE_BYTES = 8 * 1024 * 1024  # 8MB
+
+
+@api_router.post("/ai-advisor/upload")
+async def ai_advisor_upload(file: UploadFile = File(...), session_id: str = "default"):
+    if file.content_type not in ALLOWED_MIME:
+        raise HTTPException(400, f"Tipo file non supportato. Ammessi: PDF, JPG, PNG, WEBP, HEIC.")
+    data = await file.read()
+    if len(data) > MAX_FILE_BYTES:
+        raise HTTPException(413, f"File troppo grande (max {MAX_FILE_BYTES // 1024 // 1024}MB).")
+    file_id = str(uuid.uuid4())
+    await db.uploaded_files.insert_one({
+        "id": file_id,
+        "session_id": session_id,
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "size": len(data),
+        "data_base64": base64.b64encode(data).decode("utf-8"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"file_id": file_id, "filename": file.filename, "size": len(data), "content_type": file.content_type}
+
+
+# ============== FINANCIAL CONTEXT ==============
 
 async def _build_financial_context() -> str:
-    """Costruisce il contesto finanziario reale da iniettare nel system prompt."""
+    """Costruisce il contesto finanziario reale + lista cantieri/movimenti per tool use."""
     movimenti = await db.movimenti.find({}, {"_id": 0}).to_list(5000)
     cantieri = await db.cantieri.find({}, {"_id": 0}).to_list(1000)
     costi_fissi = await db.costi_fissi.find({"attivo": True}, {"_id": 0}).to_list(500)
@@ -669,23 +860,24 @@ async def _build_financial_context() -> str:
     mesi_cop = (cassa / cf_mensili) if cf_mensili > 0 else 0
 
     cantieri_info = []
-    for c in cantieri:
+    for c in cantieri[:30]:
         costi_c = c["costi_materiali"] + c["costi_manodopera"] + c["costi_subappalti"] + c.get("altri_costi", 0)
         margine = c["valore_commessa"] - costi_c
-        margine_pct = (margine / c["valore_commessa"] * 100) if c["valore_commessa"] > 0 else 0
         cantieri_info.append(
-            f"  - {c['nome']} ({c['cliente']}, {c['stato']}): valore €{c['valore_commessa']:,.0f}, "
-            f"costi €{costi_c:,.0f}, margine €{margine:,.0f} ({margine_pct:.1f}%)"
+            f"  - id={c['id'][:8]}... nome='{c['nome']}' cliente='{c['cliente']}' stato={c['stato']} "
+            f"valore=€{c['valore_commessa']:,.0f} margine=€{margine:,.0f}"
         )
+    cf_info = [f"  - id={cf['id'][:8]}... '{cf['descrizione']}' cat={cf['categoria']} €{cf['importo_mensile']:,.0f}/mese" for cf in costi_fissi[:20]]
 
-    cat_lines = "\n".join(f"  - {k}: €{v:,.0f}" for k, v in sorted(cat_costi.items(), key=lambda x: -x[1]))
+    cat_lines = "\n".join(f"  - {k}: €{v:,.0f}" for k, v in sorted(cat_costi.items(), key=lambda x: -x[1])) or "  (nessun costo)"
     cantieri_lines = "\n".join(cantieri_info) if cantieri_info else "  (nessun cantiere)"
+    cf_lines = "\n".join(cf_info) if cf_info else "  (nessun costo fisso)"
 
-    return f"""DATI FINANZIARI ATTUALI DELL'IMPRESA EDILE:
+    return f"""DATI FINANZIARI ATTUALI:
 
 CONTO ECONOMICO:
 - Fatturato totale: €{fatturato:,.0f}
-- Costi del venduto (materiali, manodopera, subappalti): €{costi_v:,.0f}
+- Costi del venduto: €{costi_v:,.0f}
 - Costi operativi: €{costi_o:,.0f}
 - Costi del personale: €{costi_p:,.0f}
 - EBITDA: €{ebitda:,.0f} ({ebitda_pct:.1f}% del fatturato)
@@ -698,26 +890,66 @@ LIQUIDITÀ:
 CANTIERI ({len(cantieri)} totali):
 {cantieri_lines}
 
-RIPARTIZIONE COSTI PER CATEGORIA:
+COSTI FISSI ATTIVI ({len(costi_fissi)}):
+{cf_lines}
+
+RIPARTIZIONE COSTI VARIABILI PER CATEGORIA:
 {cat_lines}
 """
 
 
-SYSTEM_PROMPT_BASE = """Sei un Consulente Finanziario AI specializzato per imprese edili italiane.
-Il tuo ruolo è analizzare i dati finanziari dell'azienda e fornire consigli concreti, pratici e in italiano.
+SYSTEM_PROMPT_BASE = """Sei un Consulente AI agentico per imprese edili italiane: analizzi i dati finanziari E PUOI ESEGUIRE AZIONI.
 
-REGOLE:
-- Rispondi SEMPRE in italiano
-- Sii diretto, sintetico e professionale (max 4-6 frasi per risposta, salvo richieste di approfondimento)
-- Usa cifre concrete dai dati forniti, non inventare numeri
-- Identifica criticità (EBITDA<15%, cassa<3 mesi, margini commesse<10%) e suggerisci azioni
-- Conosci la terminologia edile: cantiere, commessa, SAL, subappalti, cappotto, capannone, ecc.
-- Le soglie di riferimento per il settore edile sono:
-  * EBITDA: ottimo >20%, buono 15-20%, attenzione 5-15%, critico <5%
-  * Margine commessa: ottimo >20%, attenzione 10-20%, critico <10%
-  * Copertura cassa: minimo 3 mesi di costi fissi
-- Quando suggerisci azioni, sii specifico (es: "rinegozia il fornitore X", "aumenta del 5% il prezzo medio")
-- Non rispondere a domande non finanziarie/aziendali. Se l'utente chiede altro, riconducilo al suo business.
+REGOLE GENERALI:
+- Rispondi SEMPRE in italiano.
+- Conosci la terminologia edile (cantiere, commessa, SAL, subappalti, cappotto, capannone, DURC, F24, ecc.).
+- Soglie settore edile: EBITDA ottimo>20%, attenzione 5-15%, critico<5%; margine commessa attenzione<10%; cassa minimo 3 mesi di costi fissi.
+
+FORMATO DI RISPOSTA — OBBLIGATORIO JSON:
+Devi rispondere SEMPRE con un singolo oggetto JSON valido (NIENTE testo prima/dopo, NIENTE markdown), in uno di questi due formati:
+
+FORMATO A (risposta testuale, analisi/consiglio/domanda):
+{"type": "message", "content": "Il tuo testo in italiano qui..."}
+
+FORMATO B (proposta di una o più azioni concrete da eseguire):
+{
+  "type": "proposed_actions",
+  "explanation": "Breve spiegazione in italiano di cosa stai per fare e perché",
+  "actions": [
+    {"tool": "crea_cantiere", "params": {"nome": "...", "cliente": "...", "data_inizio": "2026-01-15", "valore_commessa": 50000}, "summary": "Crea cantiere X per €50.000"}
+  ]
+}
+
+QUANDO USARE FORMATO B (proposed_actions):
+- L'utente chiede esplicitamente di "creare", "aggiungere", "registrare", "aprire", "chiudere", "eliminare", "modificare" qualcosa.
+- L'utente carica un documento (fattura, scontrino, preventivo, F24, DURC) e va estratta un'operazione concreta.
+- L'utente fornisce dati specifici da inserire nel sistema.
+
+QUANDO USARE FORMATO A (message):
+- L'utente fa una domanda di analisi/consulenza ("come va?", "quale cantiere è in difficoltà?").
+- Hai bisogno di chiedere informazioni mancanti per completare un'azione.
+- Stai dando un consiglio generale o un riepilogo.
+
+GESTIONE DATI MANCANTI:
+- Se mancano dati obbligatori per un'azione (es. valore commessa, data), usa FORMATO A per chiederli all'utente con una domanda chiara.
+- Per data_inizio se non specificata, assumi la data di oggi.
+- Per categoria di un movimento, deduci dal contesto (fattura → Materiali; SAL → SAL; bolletta → Utenze; F24 → Tasse).
+
+RIFERIMENTI:
+- cantiere_ref accetta sia l'ID UUID che il nome del cantiere (anche parziale, case-insensitive).
+- Se l'utente dice "cantiere Bianchi" e nei dati esiste "Villa Bianchi", usa "Villa Bianchi" come ref.
+
+DOCUMENTI ALLEGATI:
+- Quando l'utente allega fatture, scontrini, preventivi, F24, DURC, contratti: ANALIZZALI con attenzione, estrai date, importi, fornitori, descrizioni, e proponi l'azione corrispondente.
+- F24 → crea_movimento tipo=uscita categoria=Tasse.
+- Fattura fornitore → crea_movimento tipo=uscita categoria appropriata.
+- Preventivo cliente firmato → crea_cantiere.
+- DURC, contratti, documenti senza importi → FORMATO A: rispondi sintetizzando il contenuto del documento.
+
+ATTENZIONE:
+- NON inventare ID. Se un'azione richiede un riferimento, usa il nome o l'ID che vedi nei DATI ATTUALI sotto.
+- Se l'utente chiede multiple operazioni, raggruppa più azioni nello stesso array "actions".
+- NON eseguire azioni distruttive (elimina_*) senza essere sicuro al 100% di cosa elimina.
 """
 
 
@@ -727,45 +959,86 @@ async def ai_advisor_status():
         "abilitato": bool(EMERGENT_LLM_KEY),
         "modello": "claude-sonnet-4-5-20250929",
         "provider": "anthropic",
-        "messaggio": "Consulente AI attivo" if EMERGENT_LLM_KEY else "EMERGENT_LLM_KEY non configurata"
+        "messaggio": "Consulente AI attivo" if EMERGENT_LLM_KEY else "EMERGENT_LLM_KEY non configurata",
+        "agentic": True,
+        "tools": ["crea_cantiere", "aggiorna_cantiere", "elimina_cantiere",
+                  "crea_movimento", "elimina_movimento", "crea_costo_fisso", "elimina_costo_fisso"]
     }
+
+
+def _parse_ai_json(raw: str) -> dict:
+    """Estrae un singolo oggetto JSON dalla risposta del modello, robusto ai bordi."""
+    import json as _json, re as _re
+    raw = (raw or "").strip()
+    # Rimuovi eventuali code-fence
+    if raw.startswith("```"):
+        raw = _re.sub(r"^```(?:json)?", "", raw).rstrip("`").strip()
+        if raw.endswith("```"):
+            raw = raw[:-3].strip()
+    # Trova il primo { e l'ultimo }
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        return {"type": "message", "content": raw}
+    snippet = raw[start:end+1]
+    try:
+        return _json.loads(snippet)
+    except Exception:
+        return {"type": "message", "content": raw}
 
 
 @api_router.post("/ai-advisor/chat", response_model=ChatResponse)
 async def ai_advisor_chat(req: ChatRequest):
     if not EMERGENT_LLM_KEY:
-        raise HTTPException(503, "Consulente AI non configurato (EMERGENT_LLM_KEY mancante)")
-    if not req.message.strip():
+        raise HTTPException(503, "Consulente AI non configurato")
+    if not req.message.strip() and not req.file_ids:
         raise HTTPException(400, "Messaggio vuoto")
 
-    # Carica cronologia PRIMA di salvare il nuovo messaggio (ultimi 20 turni)
-    prior = await db.chat_messages.find(
-        {"session_id": req.session_id}, {"_id": 0}
-    ).sort("created_at", 1).to_list(40)
-    prior = prior[-20:]  # cap a 20 messaggi per controllo costi
+    # Cronologia (ultimi 20 messaggi prima del nuovo)
+    prior = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0}).sort("created_at", 1).to_list(40)
+    prior = prior[-20:]
 
-    # Salva il messaggio utente
-    user_msg = ChatMessage(session_id=req.session_id, role="user", content=req.message)
+    # Carica file allegati
+    file_contents = []
+    attachments_info = []
+    if req.file_ids:
+        from emergentintegrations.llm.chat import FileContent
+        for fid in req.file_ids:
+            doc = await db.uploaded_files.find_one({"id": fid}, {"_id": 0})
+            if not doc:
+                continue
+            file_contents.append(FileContent(content_type=doc["content_type"], file_content_base64=doc["data_base64"]))
+            attachments_info.append({"file_id": fid, "filename": doc["filename"], "content_type": doc["content_type"]})
+
+    # Salva messaggio utente
+    user_msg = ChatMessage(
+        session_id=req.session_id, role="user", content=req.message or "(documento allegato)",
+        msg_type="file" if attachments_info and not req.message.strip() else "text",
+        attachments=attachments_info or None,
+    )
     await db.chat_messages.insert_one(user_msg.model_dump())
 
-    # Costruisce contesto finanziario aggiornato e system prompt
     contesto = await _build_financial_context()
-    system_prompt = SYSTEM_PROMPT_BASE + "\n\n" + contesto
+    system_prompt = SYSTEM_PROMPT_BASE + "\n\n" + TOOLS_SCHEMA + "\n\n" + contesto
 
-    # Costruisce il messaggio includendo la cronologia (stateless multi-turn)
+    # Cronologia stateless
     if prior:
-        transcript_lines = []
+        lines = []
         for m in prior:
             label = "Utente" if m["role"] == "user" else "Tu (assistente)"
-            transcript_lines.append(f"{label}: {m['content']}")
-        transcript = "\n".join(transcript_lines)
+            txt = m.get("content", "")
+            if m.get("msg_type") == "proposed_actions" and m.get("payload"):
+                txt = f"[Hai proposto azioni: {m['payload'].get('explanation', '')}]"
+            elif m.get("msg_type") == "action_result":
+                txt = f"[Risultato esecuzione: {txt}]"
+            lines.append(f"{label}: {txt}")
+        transcript = "\n".join(lines)
         full_message = (
-            f"[CRONOLOGIA CONVERSAZIONE PRECEDENTE]\n{transcript}\n"
-            f"[FINE CRONOLOGIA]\n\n"
-            f"[NUOVO MESSAGGIO DELL'UTENTE]\n{req.message}"
+            f"[CRONOLOGIA]\n{transcript}\n[FINE CRONOLOGIA]\n\n"
+            f"[NUOVO MESSAGGIO]\n{req.message or '(solo allegati)'}"
         )
     else:
-        full_message = req.message
+        full_message = req.message or "(solo allegati)"
 
     try:
         chat = LlmChat(
@@ -773,17 +1046,119 @@ async def ai_advisor_chat(req: ChatRequest):
             session_id=req.session_id,
             system_message=system_prompt,
         ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-
-        reply_text = await chat.send_message(UserMessage(text=full_message))
-    except Exception as e:
+        reply_raw = await chat.send_message(UserMessage(text=full_message, file_contents=file_contents or None))
+    except Exception:
         logger.exception("Errore Claude")
         raise HTTPException(500, "Errore nella chiamata al Consulente AI")
 
-    # Salva la risposta
-    assistant_msg = ChatMessage(session_id=req.session_id, role="assistant", content=reply_text)
-    await db.chat_messages.insert_one(assistant_msg.model_dump())
+    parsed = _parse_ai_json(reply_raw)
+    reply_type = parsed.get("type", "message")
 
-    return ChatResponse(session_id=req.session_id, reply=reply_text)
+    if reply_type == "proposed_actions":
+        explanation = parsed.get("explanation", "")
+        raw_actions = parsed.get("actions", []) or []
+        actions = []
+        for a in raw_actions:
+            action_id = str(uuid.uuid4())
+            actions.append(ChatReplyAction(
+                action_id=action_id,
+                tool=a.get("tool", ""),
+                params=a.get("params", {}),
+                summary=a.get("summary", a.get("tool", "")),
+            ))
+        # Salva con payload contenente le azioni in pending
+        assistant_msg = ChatMessage(
+            session_id=req.session_id, role="assistant",
+            content=explanation, msg_type="proposed_actions",
+            payload={"explanation": explanation, "actions": [a.model_dump() for a in actions], "status": "pending"},
+        )
+        await db.chat_messages.insert_one(assistant_msg.model_dump())
+        return ChatResponse(session_id=req.session_id, reply_type="proposed_actions", content=explanation, actions=actions)
+    else:
+        content = parsed.get("content") or reply_raw
+        assistant_msg = ChatMessage(session_id=req.session_id, role="assistant", content=content, msg_type="text")
+        await db.chat_messages.insert_one(assistant_msg.model_dump())
+        return ChatResponse(session_id=req.session_id, reply_type="message", content=content)
+
+
+@api_router.post("/ai-advisor/confirm-action")
+async def ai_advisor_confirm_action(req: ConfirmActionRequest):
+    """Esegue le azioni previamente proposte dall'AI."""
+    # Trova il messaggio proposed_actions più recente che contiene questi action_ids
+    candidates = await db.chat_messages.find(
+        {"session_id": req.session_id, "msg_type": "proposed_actions"},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(10)
+
+    pending = None
+    for c in candidates:
+        if c.get("payload", {}).get("status") == "pending":
+            ids = [a["action_id"] for a in c["payload"].get("actions", [])]
+            if all(aid in ids for aid in req.action_ids):
+                pending = c
+                break
+    if not pending:
+        raise HTTPException(404, "Azioni non trovate o già eseguite")
+
+    results = []
+    for a in pending["payload"]["actions"]:
+        if a["action_id"] not in req.action_ids:
+            continue
+        res = await execute_tool(a["tool"], a["params"])
+        # Audit log
+        await db.ai_actions_log.insert_one({
+            "id": str(uuid.uuid4()),
+            "session_id": req.session_id,
+            "action_id": a["action_id"],
+            "tool": a["tool"],
+            "params": a["params"],
+            "result": res,
+            "executed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        results.append({"action_id": a["action_id"], "tool": a["tool"], "summary": a.get("summary"), **res})
+
+    # Aggiorna lo stato del messaggio a executed
+    await db.chat_messages.update_one(
+        {"id": pending["id"]},
+        {"$set": {"payload.status": "executed", "payload.executed_at": datetime.now(timezone.utc).isoformat()}}
+    )
+
+    # Salva un messaggio "action_result" come riepilogo
+    summary_lines = []
+    for r in results:
+        icon = "✓" if r.get("ok") else "✗"
+        summary_lines.append(f"{icon} {r.get('summary', r['tool'])} — {r.get('message', '')}")
+    summary_text = "\n".join(summary_lines)
+    result_msg = ChatMessage(
+        session_id=req.session_id, role="assistant",
+        content=summary_text, msg_type="action_result",
+        payload={"results": results},
+    )
+    await db.chat_messages.insert_one(result_msg.model_dump())
+
+    return {"results": results, "summary": summary_text}
+
+
+@api_router.post("/ai-advisor/cancel-action")
+async def ai_advisor_cancel_action(req: ConfirmActionRequest):
+    """Marca le azioni come annullate."""
+    candidates = await db.chat_messages.find(
+        {"session_id": req.session_id, "msg_type": "proposed_actions"},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(10)
+    for c in candidates:
+        if c.get("payload", {}).get("status") == "pending":
+            await db.chat_messages.update_one(
+                {"id": c["id"]},
+                {"$set": {"payload.status": "cancelled"}}
+            )
+            break
+    msg = ChatMessage(
+        session_id=req.session_id, role="assistant",
+        content="Azioni annullate.", msg_type="text",
+    )
+    await db.chat_messages.insert_one(msg.model_dump())
+    return {"ok": True}
 
 
 @api_router.get("/ai-advisor/history/{session_id}", response_model=List[ChatMessage])
@@ -795,6 +1170,7 @@ async def ai_advisor_history(session_id: str):
 @api_router.delete("/ai-advisor/history/{session_id}")
 async def ai_advisor_clear(session_id: str):
     await db.chat_messages.delete_many({"session_id": session_id})
+    await db.uploaded_files.delete_many({"session_id": session_id})
     return {"ok": True}
 
 

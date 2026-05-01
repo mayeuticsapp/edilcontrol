@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 6 — full backend + frontend testing of the new Agentic AI feature. Backend: 13/13 pytest tests PASSED (auth requirement, status agentic flag + 7 tools, upload PNG/PDF OK, .txt 400, 9MB 413, chat reply_type='message' for analysis vs reply_type='proposed_actions' for crea cantiere, full propose→confirm flow persists in /api/cantieri, cancel flow returns 404 on subsequent confirm, history endpoint). Frontend: AI Advisor page loads, 'Agentico' badge shows, all critical data-testids present, real Claude propose→AMBER 'AZIONI PROPOSTE' card with 'Conferma ed esegui' / 'Annulla' rendered correctly, file input + paperclip wired, Nuova chat resets via window.confirm. Real Claude (claude-sonnet-4-5) was used end-to-end via Emergent Universal Key (no mocks).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_agentic_ai.py",
+    "/app/test_reports/pytest/agentic_iter6.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 1236 lines — well past the 700-line guideline. Should be split into modules: auth.py, cantieri.py, movimenti.py, costi_fissi.py, ai_advisor.py, ai_tools.py.",
+    "_resolve_cantiere_ref uses regex with re.escape but doesn't anchor — substring match like 'Test' may resolve to multiple cantieri, returning find_one's arbitrary first hit. Consider preferring exact case-insensitive match first, then fallback to contains, and surfacing ambiguity to the user.",
+    "/api/ai-advisor/upload stores the full base64 file inside MongoDB document (no GridFS, no expiry). With the 8MB cap and base64 inflation (~10.7MB BSON per file) this works for now, but uploaded_files has no TTL index and DELETE history only deletes by session_id — orphans accumulate if sessions are never cleared. Add a TTL index on created_at (e.g. 7 days) and/or delete on /confirm-action.",
+    "Audit log ai_actions_log has no index — for production reads (e.g. 'last actions') add index on (session_id, executed_at).",
+    "_parse_ai_json silently falls back to {type:'message', content: raw} if Claude returns malformed JSON — no logging. Add a warning log so we can monitor JSON-mode adherence regressions.",
+    "execute_tool's elimina_cantiere does NOT cascade-delete movimenti referencing that cantiere_id, leaving dangling cantiere_id refs on movimenti. Either cascade or set cantiere_id=null on linked movimenti.",
+    "ChatRequest does not validate session_id format/length — a malicious very-long string is accepted and persisted. Add Pydantic constr(min_length=1, max_length=128).",
+    "Frontend localStorage 'edilcontrol_chat_session' is never cleared on logout — the next user (in the same browser) inherits the previous user's chat session_id and history. Clear in logout handler.",
+    "The 'Pulisci' / ai-clear-btn is only rendered when messages.length > 0 (so 'missing testid' on empty UI is by design); fine but worth a comment for future test authors."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_agentic_ai.py (new — 13 pytest tests for the agentic AI flow)"
+  ],
+  "success_rate": {
+    "backend": "100% (13/13 agentic tests). test_auth.py from iter 5 still 100%.",
+    "frontend": "100% on the agentic UI flow (load, badge, propose card, confirm/cancel, new chat)"
+  },
+  "test_credentials": "username=Albertoadminapp, password=Murgi@2026! (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Tests create TEST_AGENTIC_FLOW_X cantiere via the agentic flow itself and clean it up at the end. test_cancel_action does NOT persist anything because it cancels before confirm. UI test created TEST_UI proposal then cancelled it (no DB write).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 6 introduced agentic AI (tool use with user confirmation) + file upload (PDF/JPG/PNG/WEBP/HEIC ≤8MB). Endpoints: GET /api/ai-advisor/status, POST /api/ai-advisor/chat, POST /api/ai-advisor/confirm-action, POST /api/ai-advisor/cancel-action, POST /api/ai-advisor/upload, GET /api/ai-advisor/history/{sid}, DELETE /api/ai-advisor/history/{sid}. ChatResponse uses reply_type ('message' | 'proposed_actions') + content + actions[]. db.uploaded_files stores base64 inline (no TTL). db.ai_actions_log audit. Old test_ai_advisor.py (pre-iter6) is obsolete (used 'reply' field) — replaced by /app/backend/tests/test_agentic_ai.py. Frontend uses kebab-case testids on AIAdvisor.jsx; ai-clear-btn only renders when messages.length>0.",
+  "rca of the issue": "N/A — no bugs found in this iteration. All 13 backend pytest cases and the smoke playwright UI flow passed first try."
+}
