@@ -750,8 +750,12 @@ async def execute_tool(tool: str, params: dict) -> dict:
             existing = await _resolve_cantiere_ref(params.get("cantiere_ref", ""))
             if not existing:
                 return {"ok": False, "message": f"Cantiere '{params.get('cantiere_ref')}' non trovato."}
+            # Scollega i movimenti dal cantiere prima di eliminarlo (no orfani)
+            await db.movimenti.update_many(
+                {"cantiere_id": existing["id"]}, {"$set": {"cantiere_id": None}}
+            )
             await db.cantieri.delete_one({"id": existing["id"]})
-            return {"ok": True, "message": f"Cantiere '{existing['nome']}' eliminato."}
+            return {"ok": True, "message": f"Cantiere '{existing['nome']}' eliminato (movimenti collegati scollegati)."}
 
         elif tool == "crea_movimento":
             cantiere_id = None

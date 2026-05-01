@@ -34,6 +34,7 @@ export function AuthProvider({ children }) {
   const logout = () => {
     localStorage.removeItem("edilcontrol_token");
     localStorage.removeItem("edilcontrol_user");
+    localStorage.removeItem("edilcontrol_chat_session");
     setUser(null);
     window.location.href = "/login";
   };
