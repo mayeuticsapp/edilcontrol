@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 5 re-test of EdilControl auth after two HIGH brute-force fixes. 28/28 backend auth tests PASSED (up from 25/26 in iter 4). Both HIGH bugs confirmed resolved: (1) datetime tz mismatch in _check_lockout no longer throws TypeError -> 500; now returns proper 429. (2) _extract_client_ip correctly reads X-Forwarded-For so lockout counter accumulates behind k8s ingress. Also verified fallback to request.client.host (no XFF -> no 500) and per-IP isolation (different XFF IPs tracked independently).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_auth.py",
+    "/app/test_reports/pytest/auth_iter5.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 857 lines (past 700-line threshold). Still worth splitting into auth.py / cantieri.py / ai_advisor.py for maintainability.",
+    "auth_middleware still duplicates JWT decode logic from get_current_user (DRY). Consider extracting a shared _decode_token(token) helper.",
+    "_extract_client_ip trusts X-Forwarded-For unconditionally. In production, if the app is ever exposed without a trusted proxy, an attacker can spoof XFF to bypass per-IP lockout. Consider whitelisting trusted proxy IPs or configuring FastAPI's ProxyHeadersMiddleware/uvicorn --forwarded-allow-ips.",
+    "DB lookup `{'username': req.username}` is still case-sensitive while the lockout identifier lowercases the username - inconsistency from iter 4 remains (minor)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_auth.py (added X-Forwarded-For header to TestBruteForce; added 2 new tests: XFF fallback and per-IP isolation)"
+  ],
+  "success_rate": {
+    "backend": "100% (28/28 auth tests)",
+    "frontend": "not retested (no FE changes this iteration)"
+  },
+  "test_credentials": "username=Albertoadminapp, password=Murgi@2026! (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None. db.login_attempts cleaned after tests.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Auth layer is fully green. test_auth.py covers login, /me, protected endpoints, brute-force (5->429 with XFF), XFF fallback, per-IP isolation, bcrypt hash format, users unique index, seed idempotency. Remaining non-blocking tech-debt: (a) split server.py, (b) dedupe JWT decode, (c) consider XFF spoofing hardening, (d) lowercase username at DB-lookup time. test_edilcontrol_api.py and test_ai_advisor.py from earlier iterations do NOT send Authorization header and will return 401 across the board - they need an auth fixture if re-used.",
+  "rca of the issue": {
+    "bug": "Fixed in iter 5: brute-force lockout returning 500 and not accumulating behind ingress",
+    "verification": "TestBruteForce::test_lockout_after_5_failures passes: 5 wrong pw from XFF=203.0.113.42 -> 401x5, 6th -> 429 with 'Troppi tentativi' message, correct password during lockout also -> 429. test_different_ips_tracked_independently confirms XFF=198.51.100.10 lockout does not affect XFF=198.51.100.20. test_lockout_without_xff_header_fallback confirms fallback to request.client.host still returns clean 401 (no 500)."
+  }
+}

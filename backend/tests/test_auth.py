@@ -163,18 +163,56 @@ class TestBruteForce:
         # fresh slate
         mongo_db.login_attempts.delete_many({})
         unique_user = "Albertoadminapp"  # same user so it counts against identifier
+        # simulate fixed client IP via X-Forwarded-For so counter accumulates behind ingress
+        hdrs = {"X-Forwarded-For": "203.0.113.42"}
         # 5 failed attempts
         for i in range(5):
-            r = requests.post(f"{API}/auth/login", json={"username": unique_user, "password": f"bad{i}"})
-            assert r.status_code == 401, f"attempt {i+1}: expected 401, got {r.status_code}"
+            r = requests.post(f"{API}/auth/login",
+                              json={"username": unique_user, "password": f"bad{i}"},
+                              headers=hdrs)
+            assert r.status_code == 401, f"attempt {i+1}: expected 401, got {r.status_code} - {r.text}"
         # 6th -> 429
-        r = requests.post(f"{API}/auth/login", json={"username": unique_user, "password": "bad6"})
-        assert r.status_code == 429
+        r = requests.post(f"{API}/auth/login",
+                          json={"username": unique_user, "password": "bad6"},
+                          headers=hdrs)
+        assert r.status_code == 429, f"expected 429, got {r.status_code} - {r.text}"
         assert "Troppi tentativi" in r.json().get("detail", "")
         # Even correct password locked out
-        r = requests.post(f"{API}/auth/login", json={"username": unique_user, "password": PASSWORD})
-        assert r.status_code == 429
+        r = requests.post(f"{API}/auth/login",
+                          json={"username": unique_user, "password": PASSWORD},
+                          headers=hdrs)
+        assert r.status_code == 429, f"correct pw during lockout: expected 429, got {r.status_code}"
         # cleanup: clear attempts so other tests can login
+        mongo_db.login_attempts.delete_many({})
+
+    def test_lockout_without_xff_header_fallback(self, mongo_db):
+        """Without X-Forwarded-For, server falls back to request.client.host - still must not 500."""
+        mongo_db.login_attempts.delete_many({})
+        # single bad attempt without XFF should return 401 cleanly
+        r = requests.post(f"{API}/auth/login",
+                          json={"username": "Albertoadminapp", "password": "badfallback"})
+        assert r.status_code == 401, f"expected 401, got {r.status_code} - {r.text}"
+        mongo_db.login_attempts.delete_many({})
+
+    def test_different_ips_tracked_independently(self, mongo_db):
+        """5 failed attempts from IP A should not lock out IP B."""
+        mongo_db.login_attempts.delete_many({})
+        user = "Albertoadminapp"
+        # lock out IP A
+        for i in range(5):
+            requests.post(f"{API}/auth/login",
+                          json={"username": user, "password": f"x{i}"},
+                          headers={"X-Forwarded-For": "198.51.100.10"})
+        # IP A should be locked
+        r = requests.post(f"{API}/auth/login",
+                          json={"username": user, "password": "x9"},
+                          headers={"X-Forwarded-For": "198.51.100.10"})
+        assert r.status_code == 429
+        # IP B should still get 401 (not 429)
+        r = requests.post(f"{API}/auth/login",
+                          json={"username": user, "password": "y0"},
+                          headers={"X-Forwarded-For": "198.51.100.20"})
+        assert r.status_code == 401, f"IP B should not be locked: got {r.status_code}"
         mongo_db.login_attempts.delete_many({})
 
 

@@ -106,6 +106,9 @@ async def _check_lockout(identifier: str) -> None:
     if rec.get("count", 0) >= MAX_FAILED_ATTEMPTS:
         last = rec.get("last_attempt")
         if last:
+            # Normalizza tz-awareness: MongoDB può restituire naive datetime
+            if isinstance(last, datetime) and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
             elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 60
             if elapsed < LOCKOUT_MINUTES:
                 raise HTTPException(
@@ -114,6 +117,18 @@ async def _check_lockout(identifier: str) -> None:
                 )
             # lockout scaduto, reset
             await db.login_attempts.delete_one({"identifier": identifier})
+
+
+def _extract_client_ip(request: Request) -> str:
+    """Estrae l'IP reale del client tenendo conto di proxy/ingress."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # primo IP della catena è il client originale
+        return xff.split(",")[0].strip()
+    xri = request.headers.get("x-real-ip")
+    if xri:
+        return xri.strip()
+    return request.client.host if request.client else "unknown"
 
 
 async def _record_failed_attempt(identifier: str) -> None:
@@ -130,7 +145,7 @@ async def _clear_attempts(identifier: str) -> None:
 
 @api_router.post("/auth/login", response_model=LoginResponse)
 async def login(req: LoginRequest, request: Request):
-    ip = request.client.host if request.client else "unknown"
+    ip = _extract_client_ip(request)
     identifier = f"{ip}:{req.username.lower()}"
 
     await _check_lockout(identifier)
