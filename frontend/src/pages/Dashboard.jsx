@@ -15,8 +15,6 @@ export default function Dashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      // Try seed first (idempotent)
-      await api.post("/seed-demo").catch(() => {});
       const [s, m] = await Promise.all([
         api.get("/dashboard/summary"),
         api.get("/dashboard/cantieri-margini"),
